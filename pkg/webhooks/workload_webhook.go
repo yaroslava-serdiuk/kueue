@@ -241,6 +241,9 @@ func validateReclaimablePods(obj *kueue.Workload, basePath *field.Path) field.Er
 
 func ValidateWorkloadUpdate(newObj, oldObj *kueue.Workload) field.ErrorList {
 	var allErrs field.ErrorList
+	if !workload.HasQuotaReservation(oldObj) {
+		return allErrs
+	}
 	specPath := field.NewPath("spec")
 	allErrs = append(allErrs, ValidateWorkload(newObj)...)
 	allErrs = append(allErrs, apivalidation.ValidateImmutableField(newObj.Spec.PodSets, oldObj.Spec.PodSets, specPath.Child("podSets"))...)

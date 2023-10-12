@@ -839,6 +839,30 @@ func TestReconciler(t *testing.T) {
 			},
 			wantErr: jobframework.ErrNoMatchingWorkloads,
 		},
+		"non-matching non-admitted workload is updated": {
+			reconcilerOptions: []jobframework.Option{
+				jobframework.WithManageJobsWithoutQueueName(true),
+			},
+			job:     *baseJobWrapper.DeepCopy(),
+			wantJob: *baseJobWrapper.DeepCopy(),
+			workloads: []kueue.Workload{
+				*utiltesting.MakeWorkload("a", "ns").Finalizers(kueue.ResourceInUseFinalizerName).
+					PodSets(*utiltesting.MakePodSet(kueue.DefaultPodSetName, 5).Request(corev1.ResourceCPU, "1").Obj()).
+					ReserveQuota(utiltesting.MakeAdmission("cq").AssignmentPodCount(10).Obj()).
+					Admitted(false).
+					Priority(0).
+					Obj(),
+			},
+			wantWorkloads: []kueue.Workload{
+				*utiltesting.MakeWorkload("a", "ns").Finalizers(kueue.ResourceInUseFinalizerName).
+					PodSets(*utiltesting.MakePodSet(kueue.DefaultPodSetName, 10).Request(corev1.ResourceCPU, "1").Obj()).
+					ReserveQuota(utiltesting.MakeAdmission("cq").AssignmentPodCount(10).Obj()).
+					Queue("foo").
+					Admitted(false).
+					Priority(0).
+					Obj(),
+			},
+		},
 		"suspended job with partial admission and admitted workload is unsuspended": {
 			reconcilerOptions: []jobframework.Option{
 				jobframework.WithManageJobsWithoutQueueName(true),
@@ -913,6 +937,39 @@ func TestReconciler(t *testing.T) {
 				*utiltesting.MakeWorkload("job", "ns").Finalizers(kueue.ResourceInUseFinalizerName).
 					PodSets(*utiltesting.MakePodSet(kueue.DefaultPodSetName, 10).Request(corev1.ResourceCPU, "1").Obj()).
 					Queue("test-queue").
+					Priority(0).
+					Labels(map[string]string{
+						controllerconsts.JobUIDLabel: "test-uid",
+					}).
+					Obj(),
+			},
+		},
+		"the workload is updated when queue name has changed for suspended job": {
+			job: *baseJobWrapper.
+				Clone().
+				Suspend(true).
+				Queue("test-queue-new").
+				UID("test-uid").
+				Obj(),
+			wantJob: *baseJobWrapper.
+				Clone().
+				Queue("test-queue").
+				UID("test-uid").
+				Obj(),
+			workloads: []kueue.Workload{
+				*utiltesting.MakeWorkload("job", "ns").Finalizers(kueue.ResourceInUseFinalizerName).
+					PodSets(*utiltesting.MakePodSet(kueue.DefaultPodSetName, 10).Request(corev1.ResourceCPU, "1").Obj()).
+					Queue("test-queue").
+					Priority(0).
+					Labels(map[string]string{
+						controllerconsts.JobUIDLabel: "test-uid",
+					}).
+					Obj(),
+			},
+			wantWorkloads: []kueue.Workload{
+				*utiltesting.MakeWorkload("job", "ns").Finalizers(kueue.ResourceInUseFinalizerName).
+					PodSets(*utiltesting.MakePodSet(kueue.DefaultPodSetName, 10).Request(corev1.ResourceCPU, "1").Obj()).
+					Queue("test-queue-new").
 					Priority(0).
 					Labels(map[string]string{
 						controllerconsts.JobUIDLabel: "test-uid",
