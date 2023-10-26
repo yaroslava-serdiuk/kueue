@@ -491,6 +491,7 @@ func AwaitAndVerifyWorkloadQueueName(ctx context.Context, client client.Client, 
 
 func AwaitAndVerifyCreatedWorkload(ctx context.Context, client client.Client, wlLookupKey types.NamespacedName, createdJob metav1.Object) *kueue.Workload {
 	createdWorkload := &kueue.Workload{}
+	ginkgo.By("checking the workload is created")
 	gomega.EventuallyWithOffset(1, func() error {
 		return client.Get(ctx, wlLookupKey, createdWorkload)
 	}, Timeout, Interval).Should(gomega.Succeed())

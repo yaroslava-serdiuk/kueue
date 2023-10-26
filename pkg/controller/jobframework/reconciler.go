@@ -421,12 +421,12 @@ func (r *JobReconciler) ensureOneWorkload(ctx context.Context, job GenericJob, o
 		}
 	}
 
-	var toUpdate *kueue.Workload
-	if match == nil && len(toDelete) > 0 && job.IsSuspended() && !workload.HasQuotaReservation(toDelete[0]) {
-		toUpdate = toDelete[0]
-		toDelete = toDelete[1:]
-	}
-
+	// var toUpdate *kueue.Workload
+	// if match == nil && len(toDelete) > 0 && job.IsSuspended() && !workload.HasQuotaReservation(toDelete[0]) {
+	// 	toUpdate = toDelete[0]
+	// 	toDelete = toDelete[1:]
+	// }
+	fmt.Printf("Olalal, I'm here, match is %v, deletedWL is %v", match, len(toDelete))
 	// If there is no matching workload and the job is running, suspend it.
 	if match == nil && !job.IsSuspended() {
 		log.V(2).Info("job with no matching workload, suspending")
@@ -476,9 +476,9 @@ func (r *JobReconciler) ensureOneWorkload(ctx context.Context, job GenericJob, o
 		return nil, fmt.Errorf("%w: deleted %d workloads", ErrExtraWorkloads, len(toDelete))
 	}
 
-	if toUpdate != nil {
-		return r.updateWorkloadToMatchJob(ctx, job, object, toUpdate)
-	}
+	// if toUpdate != nil {
+	// 	return r.updateWorkloadToMatchJob(ctx, job, object, toUpdate)
+	// }
 
 	return match, nil
 }

@@ -1543,6 +1543,62 @@ var _ = ginkgo.Describe("Job controller interacting with scheduler", ginkgo.Orde
 			})
 		})
 	})
+
+	ginkgo.It("Should schedule updated job", func() {
+		localQueue := testing.MakeLocalQueue("local-queue", ns.Name).ClusterQueue(prodClusterQ.Name).Obj()
+		ginkgo.By("create a localQueue", func() {
+			gomega.Expect(k8sClient.Create(ctx, localQueue)).Should(gomega.Succeed())
+		})
+
+		job := testingjob.MakeJob(jobName, ns.Name).Queue(localQueue.Name).Request(corev1.ResourceCPU, "3").Parallelism(2).Suspend(false).Obj()
+		lookupKey := types.NamespacedName{Name: job.Name, Namespace: job.Namespace}
+		createdJob := &batchv1.Job{}
+
+		ginkgo.By("creating the job that doesn't tolerate taint", func() {
+			gomega.Expect(k8sClient.Create(ctx, job)).Should(gomega.Succeed())
+		})
+
+		ginkgo.By("job should be suspend", func() {
+			gomega.Eventually(func() *bool {
+				gomega.Expect(k8sClient.Get(ctx, lookupKey, createdJob)).Should(gomega.Succeed())
+				return createdJob.Spec.Suspend
+			}, util.Timeout, util.Interval).Should(gomega.Equal(ptr.To(true)))
+		})
+
+		wlLookupKey := types.NamespacedName{Name: workloadjob.GetWorkloadNameForJob(jobName), Namespace: ns.Name}
+		createdWorkload := util.AwaitAndVerifyCreatedWorkload(ctx, k8sClient, wlLookupKey, createdJob)
+		createdTime := createdWorkload.CreationTimestamp
+
+		toleration := corev1.Toleration{
+			Key:    instanceKey,
+			Value:  "spot-tainted",
+			Effect: corev1.TaintEffectNoSchedule,
+		}
+		createdJob.Spec.Template.Spec.Tolerations = append(createdJob.Spec.Template.Spec.Tolerations, toleration)
+
+		ginkgo.By("updating the job", func() {
+			gomega.Expect(k8sClient.Update(ctx, createdJob)).Should(gomega.Succeed())
+		})
+
+		createdWorkload = util.AwaitAndVerifyCreatedWorkload(ctx, k8sClient, wlLookupKey, createdJob)
+
+		// ginkgo.By("verify updated workload", func() {
+		// 	gomega.Eventually(func() []corev1.Toleration{
+		// 		return createdWorkload.Spec.PodSets[0].Template.Spec.Tolerations
+		// 	}, util.Timeout, util.Interval).Should(gomega.ContainElements(toleration))
+		// })
+
+		ginkgo.By("updated job should be unsuspended", func() {
+			gomega.Expect(k8sClient.Get(ctx, lookupKey, createdJob)).Should(gomega.Succeed())
+			gomega.Eventually(func() *bool {
+				return createdJob.Spec.Suspend
+			}, util.Timeout, util.Interval).Should(gomega.Equal(ptr.To(false)))
+		})
+
+		ginkgo.By("updated workload should have the same created timestamp", func() {
+			gomega.Expect(createdWorkload.CreationTimestamp).Should(gomega.Equal(createdTime))
+		})
+	})
 })
 
 func expectJobUnsuspendedWithNodeSelectors(key types.NamespacedName, ns map[string]string) {
