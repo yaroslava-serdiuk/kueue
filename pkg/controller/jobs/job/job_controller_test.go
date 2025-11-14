@@ -3981,7 +3981,7 @@ func TestReconciler(t *testing.T) {
 	}
 }
 
-func TestCleanManagedLabels(t *testing.T) {
+func TestCleanLabels(t *testing.T) {
 	cases := map[string]struct {
 		featureEnabled bool
 		labels         map[string]string
@@ -4023,7 +4023,7 @@ func TestCleanManagedLabels(t *testing.T) {
 					Labels: tc.labels,
 				},
 			}
-			cleanManagedLabels(pt, ManagedLabels)
+			CleanLabels(pt)
 			if diff := cmp.Diff(tc.wantLabels, pt.Labels); diff != "" {
 				t.Errorf("cleanManagedLabels() mismatch (-want +got):\n%s", diff)
 			}
