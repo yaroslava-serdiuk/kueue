@@ -695,7 +695,7 @@ var _ = ginkgo.Describe("Job controller with preemption enabled", ginkgo.Ordered
 	})
 })
 
-var _ = ginkgo.Describe("RayCluster with elastic jobs via workload-slices support", ginkgo.Ordered, ginkgo.ContinueOnFailure, func() {
+var _ = ginkgo.Describe("RayCluster with elastic jobs via workload-slices support", ginkgo.Label("job:ray"), ginkgo.Ordered, ginkgo.ContinueOnFailure, func() {
 	var (
 		ns             *corev1.Namespace
 		resourceFlavor *kueue.ResourceFlavor
@@ -941,6 +941,186 @@ var _ = ginkgo.Describe("RayCluster with elastic jobs via workload-slices suppor
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(testRayClusterB), testRayClusterB)).Should(gomega.Succeed())
 			g.Expect(ptr.Deref(testRayClusterB.Spec.Suspend, false)).Should(gomega.BeFalse())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+	})
+
+	ginkgo.It("Should support raycluster partial preemption when capacity is insufficient", framework.SlowSpec, func() {
+		// Create high priority class
+		priorityClass := utiltesting.MakePriorityClass("partial-preempt-pc").
+			PriorityValue(priorityValue).Obj()
+		util.MustCreate(ctx, k8sClient, priorityClass)
+		defer func() {
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, priorityClass, true)
+		}()
+
+		ginkgo.By("Creating raycluster-a (low priority, partially preemptible)")
+		testRayClusterA := testingraycluster.MakeCluster("raycluster-a", ns.Name).
+			SetAnnotation("kueue.x-k8s.io/partial-preemption", "true").
+			Queue(localQueue.Name).
+			Request(rayv1.HeadNode, corev1.ResourceCPU, "1").
+			RequestWorkerGroup(corev1.ResourceCPU, "1").
+			ScaleFirstWorkerGroup(2).
+			Obj()
+		util.MustCreate(ctx, k8sClient, testRayClusterA)
+
+		var testRayClusterAWorkload *kueue.Workload
+		ginkgo.By("admitting the raycluster-a's workload")
+		gomega.Eventually(func(g gomega.Gomega) {
+			workloads := &kueue.WorkloadList{}
+			g.Expect(k8sClient.List(ctx, workloads, client.InNamespace(testRayClusterA.Namespace), client.MatchingLabels{constants.JobUIDLabel: string(testRayClusterA.UID)})).Should(gomega.Succeed())
+			g.Expect(workloads.Items).Should(gomega.HaveLen(1))
+			testRayClusterAWorkload = &workloads.Items[0]
+			g.Expect(workload.IsAdmitted(testRayClusterAWorkload)).Should(gomega.BeTrue())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("the raycluster-a is unsuspended")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(testRayClusterA), testRayClusterA)).Should(gomega.Succeed())
+			g.Expect(ptr.Deref(testRayClusterA.Spec.Suspend, false)).Should(gomega.BeFalse())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		// Create mock active worker pods so controller has pods to select for deletion
+		pod1 := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "raycluster-a-pod-1",
+				Namespace: ns.Name,
+				Labels: map[string]string{
+					"ray.io/cluster": "raycluster-a",
+					"ray.io/group":   "workers-group-0",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "dummy", Image: "dummy"}},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+			},
+		}
+		util.MustCreate(ctx, k8sClient, pod1)
+
+		pod2 := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "raycluster-a-pod-2",
+				Namespace: ns.Name,
+				Labels: map[string]string{
+					"ray.io/cluster": "raycluster-a",
+					"ray.io/group":   "workers-group-0",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "dummy", Image: "dummy"}},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+			},
+		}
+		util.MustCreate(ctx, k8sClient, pod2)
+
+		ginkgo.By("Creating raycluster-b (high priority, needs 3 CPUs)")
+		testRayClusterB := testingraycluster.MakeCluster("raycluster-b", ns.Name).
+			WithPriorityClassName("partial-preempt-pc").
+			Queue(localQueue.Name).
+			Request(rayv1.HeadNode, corev1.ResourceCPU, "1").
+			RequestWorkerGroup(corev1.ResourceCPU, "1").
+			ScaleFirstWorkerGroup(2).
+			Obj()
+		util.MustCreate(ctx, k8sClient, testRayClusterB)
+
+		ginkgo.By("waiting for raycluster-b workload to be admitted")
+		var testRayClusterBWorkload *kueue.Workload
+		gomega.Eventually(func(g gomega.Gomega) {
+			workloads := &kueue.WorkloadList{}
+			g.Expect(k8sClient.List(ctx, workloads, client.InNamespace(testRayClusterB.Namespace), client.MatchingLabels{constants.JobUIDLabel: string(testRayClusterB.UID)})).Should(gomega.Succeed())
+			g.Expect(workloads.Items).Should(gomega.HaveLen(1))
+			testRayClusterBWorkload = &workloads.Items[0]
+			g.Expect(workload.IsAdmitted(testRayClusterBWorkload)).Should(gomega.BeTrue())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("raycluster-b is unsuspended")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(testRayClusterB), testRayClusterB)).Should(gomega.Succeed())
+			g.Expect(ptr.Deref(testRayClusterB.Spec.Suspend, false)).Should(gomega.BeFalse())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("raycluster-a remains admitted but downscaled")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(testRayClusterA), testRayClusterA)).Should(gomega.Succeed())
+			g.Expect(ptr.Deref(testRayClusterA.Spec.Suspend, false)).Should(gomega.BeFalse())
+			wgs := testRayClusterA.Spec.WorkerGroupSpecs[0]
+			for _, podName := range wgs.ScaleStrategy.WorkersToDelete {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: podName, Namespace: ns.Name}, pod); err == nil {
+					_ = k8sClient.Delete(ctx, pod)
+				}
+			}
+			g.Expect(wgs.ScaleStrategy.WorkersToDelete).Should(gomega.HaveLen(1))
+			g.Expect(wgs.ScaleStrategy.WorkersToDelete[0]).Should(gomega.Equal("raycluster-a-pod-1"))
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+	})
+
+	ginkgo.It("Should support raycluster full preemption when partial preemption is disabled", framework.SlowSpec, func() {
+		priorityClass := utiltesting.MakePriorityClass("full-preempt-pc").
+			PriorityValue(priorityValue).Obj()
+		util.MustCreate(ctx, k8sClient, priorityClass)
+		defer func() {
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, priorityClass, true)
+		}()
+
+		ginkgo.By("Creating raycluster-a (low priority, partial preemption disabled)")
+		testRayClusterA := testingraycluster.MakeCluster("raycluster-a", ns.Name).
+			Queue(localQueue.Name).
+			Request(rayv1.HeadNode, corev1.ResourceCPU, "1").
+			RequestWorkerGroup(corev1.ResourceCPU, "1").
+			ScaleFirstWorkerGroup(2).
+			Obj()
+		util.MustCreate(ctx, k8sClient, testRayClusterA)
+
+		var testRayClusterAWorkload *kueue.Workload
+		ginkgo.By("admitting the raycluster-a's workload")
+		gomega.Eventually(func(g gomega.Gomega) {
+			workloads := &kueue.WorkloadList{}
+			g.Expect(k8sClient.List(ctx, workloads, client.InNamespace(testRayClusterA.Namespace), client.MatchingLabels{constants.JobUIDLabel: string(testRayClusterA.UID)})).Should(gomega.Succeed())
+			g.Expect(workloads.Items).Should(gomega.HaveLen(1))
+			testRayClusterAWorkload = &workloads.Items[0]
+			g.Expect(workload.IsAdmitted(testRayClusterAWorkload)).Should(gomega.BeTrue())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("the raycluster-a is unsuspended")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(testRayClusterA), testRayClusterA)).Should(gomega.Succeed())
+			g.Expect(ptr.Deref(testRayClusterA.Spec.Suspend, false)).Should(gomega.BeFalse())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("Creating raycluster-b (high priority, needs 3 CPUs)")
+		testRayClusterB := testingraycluster.MakeCluster("raycluster-b", ns.Name).
+			WithPriorityClassName("full-preempt-pc").
+			Queue(localQueue.Name).
+			Request(rayv1.HeadNode, corev1.ResourceCPU, "1").
+			RequestWorkerGroup(corev1.ResourceCPU, "1").
+			ScaleFirstWorkerGroup(2).
+			Obj()
+		util.MustCreate(ctx, k8sClient, testRayClusterB)
+
+		ginkgo.By("waiting for raycluster-b workload to be admitted")
+		var testRayClusterBWorkload *kueue.Workload
+		gomega.Eventually(func(g gomega.Gomega) {
+			workloads := &kueue.WorkloadList{}
+			g.Expect(k8sClient.List(ctx, workloads, client.InNamespace(testRayClusterB.Namespace), client.MatchingLabels{constants.JobUIDLabel: string(testRayClusterB.UID)})).Should(gomega.Succeed())
+			g.Expect(workloads.Items).Should(gomega.HaveLen(1))
+			testRayClusterBWorkload = &workloads.Items[0]
+			g.Expect(workload.IsAdmitted(testRayClusterBWorkload)).Should(gomega.BeTrue())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("raycluster-b is unsuspended")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(testRayClusterB), testRayClusterB)).Should(gomega.Succeed())
+			g.Expect(ptr.Deref(testRayClusterB.Spec.Suspend, false)).Should(gomega.BeFalse())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("raycluster-a is fully preempted (suspended)")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(testRayClusterA), testRayClusterA)).Should(gomega.Succeed())
+			g.Expect(ptr.Deref(testRayClusterA.Spec.Suspend, false)).Should(gomega.BeTrue())
 		}, util.Timeout, util.Interval).Should(gomega.Succeed())
 	})
 })

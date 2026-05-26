@@ -192,6 +192,13 @@ type TopLevelJob interface {
 	IsTopLevel() bool
 }
 
+// JobWithPreemptPods interface should be implemented by generic jobs
+// that support partial preemption of specific pods/podSets.
+type JobWithPreemptPods interface {
+	// PreemptPods requests the job to preempt/downscale a specified amount of pods for given podSets.
+	PreemptPods(ctx context.Context, c client.Client, preemptions map[kueue.PodSetReference]int32) error
+}
+
 func QueueName(job GenericJob) kueue.LocalQueueName {
 	return QueueNameForObject(job.Object())
 }

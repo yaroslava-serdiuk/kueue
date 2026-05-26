@@ -18,14 +18,17 @@ package raycluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	rayutils "github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
@@ -76,6 +79,7 @@ type RayCluster rayv1.RayCluster
 
 var _ jobframework.GenericJob = (*RayCluster)(nil)
 var _ jobframework.JobWithManagedBy = (*RayCluster)(nil)
+var _ jobframework.JobWithPreemptPods = (*RayCluster)(nil)
 
 func (j *RayCluster) Object() client.Object {
 	return (*rayv1.RayCluster)(j)
@@ -131,10 +135,15 @@ func (j *RayCluster) PodSets(ctx context.Context) ([]kueue.PodSet, error) {
 		if wgs.NumOfHosts > 1 {
 			count *= wgs.NumOfHosts
 		}
+		var minCount *int32
+		if wgs.MinReplicas != nil && *wgs.MinReplicas >= 0 {
+			minCount = wgs.MinReplicas
+		}
 		podSets[index+1] = kueue.PodSet{
 			Name:     kueue.NewPodSetReference(wgs.GroupName),
 			Template: *wgs.Template.DeepCopy(),
 			Count:    count,
+			MinCount: minCount,
 		}
 		if features.Enabled(features.TopologyAwareScheduling) {
 			topologyRequest, err := jobframework.NewPodSetTopologyRequest(
@@ -205,4 +214,84 @@ func (j *RayCluster) ManagedBy() *string {
 
 func (j *RayCluster) SetManagedBy(managedBy *string) {
 	j.Spec.ManagedBy = managedBy
+}
+
+func (j *RayCluster) PreemptPods(ctx context.Context, c client.Client, preemptions map[kueue.PodSetReference]int32) error {
+	object := j.Object()
+	patch := client.MergeFrom(j.Object().DeepCopyObject().(client.Object))
+	modified := false
+
+	for podSetName, preemptCount := range preemptions {
+		if podSetName == headGroupPodSetName {
+			return errors.New("preempting head group is not supported")
+		}
+
+		// Find the corresponding worker group spec
+		var wgs *rayv1.WorkerGroupSpec
+		for i := range j.Spec.WorkerGroupSpecs {
+			if kueue.NewPodSetReference(j.Spec.WorkerGroupSpecs[i].GroupName) == podSetName {
+				wgs = &j.Spec.WorkerGroupSpecs[i]
+				break
+			}
+		}
+		if wgs == nil {
+			continue
+		}
+
+		// List pods belonging to this worker group
+		podList := &corev1.PodList{}
+		err := c.List(ctx, podList,
+			client.InNamespace(j.Namespace),
+			client.MatchingLabels{
+				rayutils.RayClusterLabelKey: j.Name,
+				rayutils.RayNodeGroupLabelKey: string(podSetName),
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+		// Select active pods to delete
+		var podsToDelete []string
+		for _, pod := range podList.Items {
+			if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
+				podsToDelete = append(podsToDelete, pod.Name)
+				if int32(len(podsToDelete)) >= preemptCount {
+					break
+				}
+			}
+		}
+
+		existingToDelete := sets.New(wgs.ScaleStrategy.WorkersToDelete...)
+		var newPodsToDelete []string
+		for _, pod := range podsToDelete {
+			if !existingToDelete.Has(pod) {
+				newPodsToDelete = append(newPodsToDelete, pod)
+			}
+		}
+		if len(newPodsToDelete) > 0 {
+			wgs.ScaleStrategy.WorkersToDelete = append(wgs.ScaleStrategy.WorkersToDelete, newPodsToDelete...)
+			modified = true
+		}
+
+		// Inject the "kueue.x-k8s.io/elastic-job" scheduling gate to the worker group template spec
+		hasGate := false
+		for _, gate := range wgs.Template.Spec.SchedulingGates {
+			if gate.Name == kueue.ElasticJobSchedulingGate {
+				hasGate = true
+				break
+			}
+		}
+		if !hasGate {
+			wgs.Template.Spec.SchedulingGates = append(wgs.Template.Spec.SchedulingGates, corev1.PodSchedulingGate{
+				Name: kueue.ElasticJobSchedulingGate,
+			})
+			modified = true
+		}
+	}
+
+	if modified {
+		return c.Patch(ctx, object, patch)
+	}
+	return nil
 }

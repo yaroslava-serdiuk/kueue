@@ -26,12 +26,14 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -113,6 +115,7 @@ type Target struct {
 	WorkloadInfo *workload.Info
 	Reason       string
 	WorkloadCq   *schdcache.ClusterQueueSnapshot
+	Preemptions  map[kueue.PodSetReference]int32
 }
 
 // ensures that Target implements ObjectRefProvider interface at compile time
@@ -221,6 +224,59 @@ func (p *Preemptor) IssuePreemptions(
 		p.preemptionExpectations.ExpectUIDs(log, targetKey, []types.UID{target.WorkloadInfo.Obj.UID})
 
 		message := preemptionMessage(preemptor.Obj, target.Reason, preemptorPath, preempteePath)
+
+		if len(target.Preemptions) > 0 {
+			log.V(3).Info("Issuing partial preemption / pod counts reduction", "targetWorkload", klog.KObj(target.WorkloadInfo.Obj), "preemptions", target.Preemptions)
+			err := workload.PatchAdmissionStatus(ctx, p.client, target.WorkloadInfo.Obj, p.clock, func(wl *kueue.Workload) (bool, error) {
+				if wl.Status.Admission == nil {
+					return false, nil
+				}
+				modified := false
+				for i := range wl.Status.Admission.PodSetAssignments {
+					psa := &wl.Status.Admission.PodSetAssignments[i]
+					if subCount, found := target.Preemptions[psa.Name]; found {
+						currentCount := ptr.Deref(psa.Count, 0)
+						if psa.Count == nil {
+							for _, ps := range wl.Spec.PodSets {
+								if ps.Name == psa.Name {
+									currentCount = ps.Count
+									break
+								}
+							}
+						}
+						log.V(3).Info("PatchStatus count evaluation", "psaName", psa.Name, "currentCount", currentCount, "subCount", subCount)
+						if currentCount > subCount {
+							newCount := currentCount - subCount
+							if currentCount > 0 && newCount < currentCount {
+								for resName, q := range psa.ResourceUsage {
+									milliVal := q.MilliValue()
+									newMilliVal := milliVal * int64(newCount) / int64(currentCount)
+									psa.ResourceUsage[resName] = *resource.NewMilliQuantity(newMilliVal, q.Format)
+								}
+							}
+							psa.Count = ptr.To(newCount)
+							modified = true
+						}
+					}
+				}
+				log.V(3).Info("PatchStatus finish", "modified", modified)
+				return modified, nil
+			})
+			if err != nil {
+				log.Error(err, "Failed to patch workload counts for partial preemption", "targetWorkload", klog.KObj(target.WorkloadInfo.Obj))
+				p.preemptionExpectations.ObservedUID(log, targetKey, target.WorkloadInfo.Obj.UID)
+				errCh.SendErrorWithCancel(err, cancel)
+				preemptionErrors.Add(1)
+				return
+			}
+			successfullyPreempted.Add(1)
+			p.recorder.Eventf(target.WorkloadInfo.Obj, corev1.EventTypeNormal, "PartiallyPreempted", message)
+			p.recorder.Eventf(preemptor.Obj, corev1.EventTypeNormal, "PartiallyPreemptedWorkload",
+				"Partially preempted workload %s (UID: %s) in ClusterQueue %s",
+				klog.KObj(target.WorkloadInfo.Obj), target.WorkloadInfo.Obj.UID, target.WorkloadInfo.ClusterQueue)
+			return
+		}
+
 		wlCopy := target.WorkloadInfo.Obj.DeepCopy()
 		exposeLqMetrics := cache.ShouldExposeLocalQueueMetricsForWorkload(log, wlCopy)
 		err := workload.Evict(
@@ -308,12 +364,56 @@ func (p *Preemptor) classicalPreemptions(preemptionCtx *preemptionCtx) []*Target
 		var targets []*Target
 		candidatesGenerator.Reset()
 		for candidate, reason := candidatesGenerator.Next(attemptOpts.borrowing); candidate != nil; candidate, reason = candidatesGenerator.Next(attemptOpts.borrowing) {
-			preemptionCtx.snapshot.RemoveWorkload(candidate)
-			targets = append(targets, &Target{
-				WorkloadInfo: candidate,
-				Reason:       reason,
-				WorkloadCq:   preemptionCtx.snapshot.ClusterQueue(candidate.ClusterQueue),
-			})
+			isPartial := canBePartiallyPreempted(candidate.Obj)
+			minCounts := getMinCounts(candidate.Obj)
+
+			preemptionCtx.log.V(3).Info("Evaluating candidate for preemption",
+				"candidateWorkload", candidate.Obj.Name,
+				"isPartial", isPartial,
+				"minCounts", minCounts,
+				"priority", candidate.Obj.Spec.Priority)
+
+			var cloned *workload.Info
+			var preemptedCounts map[kueue.PodSetReference]int32
+
+			if isPartial && len(minCounts) > 0 {
+				preemptedCounts = make(map[kueue.PodSetReference]int32)
+				targetCounts := make(map[kueue.PodSetReference]int32)
+				hasDelta := false
+
+				for _, ps := range candidate.Obj.Spec.PodSets {
+					minCount, found := minCounts[ps.Name]
+					if found && ps.Count > minCount {
+						preemptedCounts[ps.Name] = ps.Count - minCount
+						targetCounts[ps.Name] = minCount
+						hasDelta = true
+					} else {
+						targetCounts[ps.Name] = ps.Count
+					}
+				}
+				if hasDelta {
+					cloned = cloneWorkloadWithReducedCounts(candidate, targetCounts)
+				}
+			}
+
+			if cloned != nil {
+				preemptionCtx.snapshot.RemoveWorkload(candidate)
+				preemptionCtx.snapshot.AddWorkload(cloned)
+				targets = append(targets, &Target{
+					WorkloadInfo: candidate,
+					Reason:       reason,
+					WorkloadCq:   preemptionCtx.snapshot.ClusterQueue(candidate.ClusterQueue),
+					Preemptions:  preemptedCounts,
+				})
+			} else {
+				preemptionCtx.snapshot.RemoveWorkload(candidate)
+				targets = append(targets, &Target{
+					WorkloadInfo: candidate,
+					Reason:       reason,
+					WorkloadCq:   preemptionCtx.snapshot.ClusterQueue(candidate.ClusterQueue),
+				})
+			}
+
 			if workloadFits(preemptionCtx, attemptOpts.borrowing) {
 				targets = fillBackWorkloads(preemptionCtx, targets, attemptOpts.borrowing)
 				restoreSnapshot(preemptionCtx.snapshot, targets)
@@ -342,6 +442,12 @@ func fillBackWorkloads(preemptionCtx *preemptionCtx, targets []*Target, allowBor
 
 func restoreSnapshot(snapshot *schdcache.Snapshot, targets []*Target) {
 	for _, t := range targets {
+		if len(t.Preemptions) > 0 {
+			cq := snapshot.ClusterQueue(t.WorkloadInfo.ClusterQueue)
+			if cloned, found := cq.Workloads[workload.Key(t.WorkloadInfo.Obj)]; found {
+				snapshot.RemoveWorkload(cloned)
+			}
+		}
 		snapshot.AddWorkload(t.WorkloadInfo)
 	}
 }
@@ -670,4 +776,53 @@ func buildCQPath(cqName string, cqSnap *schdcache.ClusterQueueSnapshot) string {
 	// Reverse the slice since we want parent first
 	slices.Reverse(parts)
 	return "/" + strings.Join(parts, "/")
+}
+
+func getMinCounts(wl *kueue.Workload) map[kueue.PodSetReference]int32 {
+	minCounts := make(map[kueue.PodSetReference]int32)
+	for _, ps := range wl.Spec.PodSets {
+		if ps.MinCount != nil {
+			minCounts[ps.Name] = *ps.MinCount
+		}
+	}
+	return minCounts
+}
+
+func cloneWorkloadWithReducedCounts(wlInfo *workload.Info, targetCounts map[kueue.PodSetReference]int32) *workload.Info {
+	clonedWl := wlInfo.Obj.DeepCopy()
+	for i := range clonedWl.Spec.PodSets {
+		ps := &clonedWl.Spec.PodSets[i]
+		if newCount, found := targetCounts[ps.Name]; found {
+			ps.Count = newCount
+		}
+	}
+	if clonedWl.Status.Admission != nil {
+		for i := range clonedWl.Status.Admission.PodSetAssignments {
+			psa := &clonedWl.Status.Admission.PodSetAssignments[i]
+			if newCount, found := targetCounts[psa.Name]; found {
+				originalCount := ptr.Deref(psa.Count, 0)
+				if originalCount == 0 {
+					for _, ps := range wlInfo.Obj.Spec.PodSets {
+						if ps.Name == psa.Name {
+							originalCount = ps.Count
+							break
+						}
+					}
+				}
+				if originalCount > 0 && newCount < originalCount {
+					for resName, q := range psa.ResourceUsage {
+						milliVal := q.MilliValue()
+						newMilliVal := milliVal * int64(newCount) / int64(originalCount)
+						psa.ResourceUsage[resName] = *resource.NewMilliQuantity(newMilliVal, q.Format)
+					}
+				}
+				psa.Count = ptr.To(newCount)
+			}
+		}
+	}
+	return workload.NewInfo(clonedWl)
+}
+
+func canBePartiallyPreempted(wl *kueue.Workload) bool {
+	return wl.Annotations != nil && wl.Annotations["kueue.x-k8s.io/partial-preemption"] == "true"
 }

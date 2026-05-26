@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
+	rayutils "github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -358,6 +359,7 @@ func TestReconciler(t *testing.T) {
 							}).
 							Obj(),
 						*utiltestingapi.MakePodSet("workers-group-0", 1).
+							SetMinimumCount(0).
 							PodSpec(corev1.PodSpec{
 								RestartPolicy: corev1.RestartPolicyNever,
 								Containers: []corev1.Container{
@@ -413,6 +415,7 @@ func TestReconciler(t *testing.T) {
 							Labels(map[string]string{constants.PodSetLabel: "head"}).
 							Obj(),
 						*utiltestingapi.MakePodSet("workers-group-0", 1).
+							SetMinimumCount(0).
 							PodSpec(corev1.PodSpec{
 								RestartPolicy: corev1.RestartPolicyNever,
 								Containers: []corev1.Container{
@@ -477,6 +480,7 @@ func TestReconciler(t *testing.T) {
 							}).
 							Obj(),
 						*utiltestingapi.MakePodSet("workers-group-0", 1).
+							SetMinimumCount(0).
 							PodSpec(corev1.PodSpec{
 								RestartPolicy: corev1.RestartPolicyNever,
 								Containers: []corev1.Container{
@@ -515,6 +519,7 @@ func TestReconciler(t *testing.T) {
 							}).
 							Obj(),
 						*utiltestingapi.MakePodSet("workers-group-0", 1).
+							SetMinimumCount(0).
 							PodSpec(corev1.PodSpec{
 								RestartPolicy: corev1.RestartPolicyNever,
 								Containers: []corev1.Container{
@@ -596,6 +601,7 @@ func TestReconciler(t *testing.T) {
 							}).
 							Obj(),
 						*utiltestingapi.MakePodSet("workers-group-0", 2).
+							SetMinimumCount(0).
 							PodSpec(corev1.PodSpec{
 								RestartPolicy: corev1.RestartPolicyNever,
 								Containers: []corev1.Container{
@@ -652,6 +658,7 @@ func TestReconciler(t *testing.T) {
 							}).
 							Obj(),
 						*utiltestingapi.MakePodSet("workers-group-0", 2).
+							SetMinimumCount(0).
 							PodSpec(corev1.PodSpec{
 								RestartPolicy: corev1.RestartPolicyNever,
 								Containers: []corev1.Container{
@@ -712,7 +719,7 @@ func TestReconciler(t *testing.T) {
 					kcBuilder = kcBuilder.WithStatusSubresource(&tc.workloads[i])
 				}
 
-				kcBuilder = clientBuilder.WithObjects(tc.initObjects...)
+				kcBuilder = kcBuilder.WithObjects(tc.initObjects...)
 
 				kClient := kcBuilder.Build()
 				for _, testWl := range tc.workloads {
@@ -763,3 +770,101 @@ func TestReconciler(t *testing.T) {
 		}
 	}
 }
+
+func TestPreemptPods(t *testing.T) {
+	ctx, _ := utiltesting.ContextWithLog(t)
+	clientBuilder := utiltesting.NewClientBuilder(rayv1.AddToScheme)
+
+	cluster := testingrayutil.MakeCluster("raycluster", "ns").
+		WithHeadGroupSpec(rayv1.HeadGroupSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "head_c"}}},
+			},
+		}).
+		WithWorkerGroups(rayv1.WorkerGroupSpec{
+			GroupName: "group1",
+			Replicas:  ptr.To[int32](5),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "group1_c"}}},
+			},
+		}).
+		Obj()
+
+	pod1 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod-1",
+			Namespace: "ns",
+			Labels: map[string]string{
+				rayutils.RayClusterLabelKey:   "raycluster",
+				rayutils.RayNodeGroupLabelKey: "group1",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	pod2 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod-2",
+			Namespace: "ns",
+			Labels: map[string]string{
+				rayutils.RayClusterLabelKey:   "raycluster",
+				rayutils.RayNodeGroupLabelKey: "group1",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	kClient := clientBuilder.WithObjects(cluster, pod1, pod2).Build()
+	rayJob := (*RayCluster)(cluster)
+
+	// 1. Preempt 1 pod from group1
+	preemptions := map[kueue.PodSetReference]int32{
+		"group1": 1,
+	}
+	err := rayJob.PreemptPods(ctx, kClient, preemptions)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Fetch updated cluster
+	var updatedCluster rayv1.RayCluster
+	err = kClient.Get(ctx, client.ObjectKeyFromObject(cluster), &updatedCluster)
+	if err != nil {
+		t.Fatalf("failed to get updated cluster: %v", err)
+	}
+
+	// Verify scaleStrategy workersToDelete has 1 pod
+	wgs := updatedCluster.Spec.WorkerGroupSpecs[0]
+	if len(wgs.ScaleStrategy.WorkersToDelete) != 1 {
+		t.Errorf("expected 1 worker to delete, got: %v", wgs.ScaleStrategy.WorkersToDelete)
+	}
+
+	// Verify scheduling gate is injected
+	hasGate := false
+	for _, gate := range wgs.Template.Spec.SchedulingGates {
+		if gate.Name == kueue.ElasticJobSchedulingGate {
+			hasGate = true
+			break
+		}
+	}
+	if !hasGate {
+		t.Error("expected scheduling gate to be injected")
+	}
+
+	// 2. Attempt to preempt head group
+	preemptionsHead := map[kueue.PodSetReference]int32{
+		headGroupPodSetName: 1,
+	}
+	err = rayJob.PreemptPods(ctx, kClient, preemptionsHead)
+	if err == nil {
+		t.Fatal("expected error when preempting head group, but got nil")
+	}
+	if err.Error() != "preempting head group is not supported" {
+		t.Errorf("unexpected error message: %v", err.Error())
+	}
+}
+

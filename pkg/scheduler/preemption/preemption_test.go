@@ -4839,3 +4839,87 @@ func TestPriorityInfo(t *testing.T) {
 		})
 	}
 }
+
+func TestIssuePreemptionsPartial(t *testing.T) {
+	features.SetFeatureGateDuringTest(t, features.WorkloadRequestUseMergePatch, true)
+	now := time.Now().Truncate(time.Second)
+
+	// 1. Create a target workload representing a job
+	wlTarget := utiltestingapi.MakeWorkload("ray-wl", "default").
+		UID("wl-target-uid").
+		Label(controllerconstants.JobUIDLabel, "job-target-uid").
+		ReserveQuotaAt(
+			utiltestingapi.MakeAdmission("standalone").
+				PodSets(
+					utiltestingapi.MakePodSetAssignment("head").Count(1).Obj(),
+					utiltestingapi.MakePodSetAssignment("group1").Count(2).Obj(),
+				).
+				Obj(),
+			now,
+		).
+		Obj()
+
+	// 2. Create client
+	cl := utiltesting.NewClientBuilder().
+		WithObjects(wlTarget).
+		WithStatusSubresource(&kueue.Workload{}).
+		Build()
+
+	cqCache := schdcache.New(cl)
+	broadcaster := record.NewBroadcaster()
+	scheme := runtime.NewScheme()
+	if err := kueue.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed adding kueue scheme: %v", err)
+	}
+	recorder := broadcaster.NewRecorder(scheme, corev1.EventSource{Component: "test"})
+	preemptor := New(cl, workload.Ordering{}, recorder, nil, false, clocktesting.NewFakeClock(now), nil, preemptexpectations.New(), nil)
+
+	wlInfo := workload.NewInfo(wlTarget)
+	wlInfo.ClusterQueue = "standalone"
+
+	// Create a target with Preemptions mapped to trigger pod preemption
+	targets := []*Target{
+		{
+			WorkloadInfo: wlInfo,
+			Reason:       "InClusterQueue",
+			WorkloadCq:   &schdcache.ClusterQueueSnapshot{Name: "standalone"},
+			Preemptions: map[kueue.PodSetReference]int32{
+				"group1": 1,
+			},
+		},
+	}
+
+	ctx, _ := utiltesting.ContextWithLog(t)
+
+	// Execute preemption
+	preempted, failed, err := preemptor.IssuePreemptions(ctx, cqCache, wlInfo, targets, &schdcache.ClusterQueueSnapshot{Name: "standalone"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if preempted != 1 {
+		t.Errorf("expected 1 preempted target, got: %d", preempted)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed preemptions, got: %d", failed)
+	}
+
+	// Fetch updated Workload to verify pod counts were reduced
+	var updatedWl kueue.Workload
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(wlTarget), &updatedWl); err != nil {
+		t.Fatalf("failed to get updated workload: %v", err)
+	}
+
+	foundGroup1 := false
+	for _, assignment := range updatedWl.Status.Admission.PodSetAssignments {
+		if assignment.Name == "group1" {
+			foundGroup1 = true
+			if assignment.Count == nil || *assignment.Count != 1 {
+				t.Errorf("expected group1 count to be 1, got: %v", ptr.Deref(assignment.Count, -1))
+			}
+		}
+	}
+	if !foundGroup1 {
+		t.Error("group1 assignment not found in updated workload status")
+	}
+}
+

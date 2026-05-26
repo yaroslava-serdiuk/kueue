@@ -657,7 +657,45 @@ func (r *JobReconciler) ReconcileGenericJob(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// workload is admitted and job is running, nothing to do.
+	// workload is admitted and job is running.
+	// If the job supports partial preemption, check if admitted counts are reduced.
+	if preemptJob, ok := job.(JobWithPreemptPods); ok {
+		podSets, err := job.PodSets(ctx)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		preemptions := make(map[kueue.PodSetReference]int32)
+		assignmentMap := make(map[kueue.PodSetReference]int32)
+		for _, assignment := range wl.Status.Admission.PodSetAssignments {
+			count := assignment.Count
+			if count == nil {
+				for _, ps := range podSets {
+					if ps.Name == assignment.Name {
+						count = ptr.To(ps.Count)
+						break
+					}
+				}
+			}
+			assignmentMap[assignment.Name] = ptr.Deref(count, 0)
+		}
+
+		for _, ps := range podSets {
+			admittedCount, found := assignmentMap[ps.Name]
+			if found && ps.Count > admittedCount {
+				preemptions[ps.Name] = ps.Count - admittedCount
+			}
+		}
+
+		if len(preemptions) > 0 {
+			log.V(3).Info("Executing pod preemption due to workload admitted counts scale-down", "preemptions", preemptions)
+			if err := preemptJob.PreemptPods(ctx, r.client, preemptions); err != nil {
+				log.Error(err, "Failed to preempt pods")
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
 	// For elastic jobs, pod ungating is handled by the ElasticJobUngater controller.
 	log.V(3).Info("Job running with admitted workload, nothing to do")
 	return ctrl.Result{}, nil
@@ -1383,6 +1421,15 @@ func ConstructWorkload(ctx context.Context, c client.Client, job GenericJob, lab
 	}
 
 	wl := NewWorkload(newWorkloadName(job), object, podSets, labelKeysToCopy)
+	if wl.Annotations == nil {
+		wl.Annotations = make(map[string]string)
+	}
+	if val, found := object.GetAnnotations()["kueue.x-k8s.io/partial-preemption"]; found {
+		wl.Annotations["kueue.x-k8s.io/partial-preemption"] = val
+	}
+	if val, found := object.GetAnnotations()["kueue.x-k8s.io/partial-preemption-min-counts"]; found {
+		wl.Annotations["kueue.x-k8s.io/partial-preemption-min-counts"] = val
+	}
 	if wl.Labels == nil {
 		wl.Labels = make(map[string]string)
 	}
