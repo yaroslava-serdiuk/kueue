@@ -54,6 +54,14 @@ type PodSetApplyConfiguration struct {
 	//
 	// This is an alpha field and requires enabling PartialAdmission feature gate.
 	MinCount *int32 `json:"minCount,omitempty"`
+	// preemptionMinCount is the minimum number of pods for the spec acceptable
+	// if the workload supports partial preemption.
+	//
+	// If not provided, partial preemption for the current PodSet is not
+	// enabled.
+	//
+	// This is an alpha field and requires enabling PartialPreemption feature gate.
+	PreemptionMinCount *int32 `json:"preemptionMinCount,omitempty"`
 	// topologyRequest defines the topology request for the PodSet.
 	TopologyRequest *PodSetTopologyRequestApplyConfiguration `json:"topologyRequest,omitempty"`
 }
@@ -93,6 +101,14 @@ func (b *PodSetApplyConfiguration) WithCount(value int32) *PodSetApplyConfigurat
 // If called multiple times, the MinCount field is set to the value of the last call.
 func (b *PodSetApplyConfiguration) WithMinCount(value int32) *PodSetApplyConfiguration {
 	b.MinCount = &value
+	return b
+}
+
+// WithPreemptionMinCount sets the PreemptionMinCount field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PreemptionMinCount field is set to the value of the last call.
+func (b *PodSetApplyConfiguration) WithPreemptionMinCount(value int32) *PodSetApplyConfiguration {
+	b.PreemptionMinCount = &value
 	return b
 }
 

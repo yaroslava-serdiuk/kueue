@@ -1162,6 +1162,11 @@ func (in *PodSet) DeepCopyInto(out *PodSet) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.PreemptionMinCount != nil {
+		in, out := &in.PreemptionMinCount, &out.PreemptionMinCount
+		*out = new(int32)
+		**out = **in
+	}
 	if in.TopologyRequest != nil {
 		in, out := &in.TopologyRequest, &out.TopologyRequest
 		*out = new(PodSetTopologyRequest)

@@ -1871,6 +1871,7 @@ func autoConvert_v1beta1_PodSet_To_v1beta2_PodSet(in *PodSet, out *v1beta2.PodSe
 	out.Template = in.Template
 	out.Count = in.Count
 	out.MinCount = (*int32)(unsafe.Pointer(in.MinCount))
+	out.PreemptionMinCount = (*int32)(unsafe.Pointer(in.PreemptionMinCount))
 	if in.TopologyRequest != nil {
 		in, out := &in.TopologyRequest, &out.TopologyRequest
 		*out = new(v1beta2.PodSetTopologyRequest)
@@ -1893,6 +1894,7 @@ func autoConvert_v1beta2_PodSet_To_v1beta1_PodSet(in *v1beta2.PodSet, out *PodSe
 	out.Template = in.Template
 	out.Count = in.Count
 	out.MinCount = (*int32)(unsafe.Pointer(in.MinCount))
+	out.PreemptionMinCount = (*int32)(unsafe.Pointer(in.PreemptionMinCount))
 	if in.TopologyRequest != nil {
 		in, out := &in.TopologyRequest, &out.TopologyRequest
 		*out = new(PodSetTopologyRequest)

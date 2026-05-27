@@ -73,6 +73,13 @@ func (w *WorkloadWebhook) Default(ctx context.Context, wl *kueue.Workload) error
 		}
 	}
 
+	// drop preemptionMinCounts if PartialPreemption is not enabled
+	if !features.Enabled(features.PartialPreemption) {
+		for i := range wl.Spec.PodSets {
+			wl.Spec.PodSets[i].PreemptionMinCount = nil
+		}
+	}
+
 	return nil
 }
 

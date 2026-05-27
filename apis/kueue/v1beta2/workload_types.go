@@ -553,6 +553,7 @@ type TopologyAssignmentSlicePodCounts struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.minCount) ? self.minCount <= self.count : true", message="minCount should be positive and less or equal to count"
+// +kubebuilder:validation:XValidation:rule="has(self.preemptionMinCount) ? self.preemptionMinCount <= self.count : true", message="preemptionMinCount should be non-negative and less or equal to count"
 type PodSet struct {
 	// name is the PodSet name.
 	// +kubebuilder:default=main
@@ -594,6 +595,18 @@ type PodSet struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MinCount *int32 `json:"minCount,omitempty"`
+
+	// preemptionMinCount is the minimum number of pods for the spec acceptable
+	// if the workload supports partial preemption.
+	//
+	// If not provided, partial preemption for the current PodSet is not
+	// enabled.
+	//
+	// This is an alpha field and requires enabling PartialPreemption feature gate.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	PreemptionMinCount *int32 `json:"preemptionMinCount,omitempty"`
 
 	// topologyRequest defines the topology request for the PodSet.
 	//

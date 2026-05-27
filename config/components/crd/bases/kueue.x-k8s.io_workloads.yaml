@@ -121,6 +121,18 @@ spec:
                       maxLength: 63
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
+                    preemptionMinCount:
+                      description: |-
+                        preemptionMinCount is the minimum number of pods for the spec acceptable
+                        if the workload supports partial preemption.
+
+                        If not provided, partial preemption for the current PodSet is not
+                        enabled.
+
+                        This is an alpha field and requires enabling PartialPreemption feature gate.
+                      format: int32
+                      minimum: 0
+                      type: integer
                     template:
                       description: |-
                         template is the Pod template.
@@ -8797,6 +8809,10 @@ spec:
                   x-kubernetes-validations:
                   - message: minCount should be positive and less or equal to count
                     rule: 'has(self.minCount) ? self.minCount <= self.count : true'
+                  - message: preemptionMinCount should be non-negative and less or
+                      equal to count
+                    rule: 'has(self.preemptionMinCount) ? self.preemptionMinCount
+                      <= self.count : true'
                 maxItems: 8
                 minItems: 1
                 type: array
@@ -9557,6 +9573,18 @@ spec:
                       maxLength: 63
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
+                    preemptionMinCount:
+                      description: |-
+                        preemptionMinCount is the minimum number of pods for the spec acceptable
+                        if the workload supports partial preemption.
+
+                        If not provided, partial preemption for the current PodSet is not
+                        enabled.
+
+                        This is an alpha field and requires enabling PartialPreemption feature gate.
+                      format: int32
+                      minimum: 0
+                      type: integer
                     template:
                       description: |-
                         template is the Pod template.
@@ -18277,6 +18305,10 @@ spec:
                   x-kubernetes-validations:
                   - message: minCount should be positive and less or equal to count
                     rule: 'has(self.minCount) ? self.minCount <= self.count : true'
+                  - message: preemptionMinCount should be non-negative and less or
+                      equal to count
+                    rule: 'has(self.preemptionMinCount) ? self.preemptionMinCount
+                      <= self.count : true'
                 maxItems: 8
                 minItems: 1
                 type: array

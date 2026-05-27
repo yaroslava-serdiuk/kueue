@@ -34,6 +34,9 @@ const (
 	// Enables partial admission.
 	PartialAdmission featuregate.Feature = "PartialAdmission"
 
+	// Enables partial preemption.
+	PartialPreemption featuregate.Feature = "PartialPreemption"
+
 	// owner: @KunWuLuan
 	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/582-preempt-based-on-flavor-order
 	//
@@ -398,6 +401,9 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	PartialAdmission: {
 		{Version: version.MustParse("0.4"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("0.5"), Default: true, PreRelease: featuregate.Beta},
+	},
+	PartialPreemption: {
+		{Version: version.MustParse("0.18"), Default: false, PreRelease: featuregate.Alpha},
 	},
 	FlavorFungibility: {
 		{Version: version.MustParse("0.5"), Default: true, PreRelease: featuregate.Beta},
