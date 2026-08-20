@@ -20,6 +20,8 @@ import (
 	"time"
 )
 
+type ElasticJobScaleUpAnnotationValue string
+
 const (
 	KueueName                    = "kueue"
 	MultiKueueName               = "multikueue"
@@ -86,4 +88,12 @@ const (
 
 	// ElasticJobAnnotation is an annotation set on the Job to indicate that it is an elastic job.
 	ElasticJobAnnotation = "kueue.x-k8s.io/elastic-job"
+
+	// ElasticJobScaleUpAnnotationKey refers to the annotation key present on Jobs that support
+	// partial scale up.
+	// This annotation is alpha-level.
+	ElasticJobScaleUpAnnotationKey = "kueue.x-k8s.io/elastic-job-scale-up"
+
+	ElasticJobScaleUpAtomic  ElasticJobScaleUpAnnotationValue = "atomic"
+	ElasticJobScaleUpPartial ElasticJobScaleUpAnnotationValue = "partial"
 )
